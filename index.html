@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Control 4G ESP32 & Export CSV</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; padding: 15px; background: #eef2f5; margin: 0; }
+    .box { background: white; padding: 20px; border-radius: 12px; max-width: 420px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    .weight-box { background: #f8f9fa; border: 2px solid #007bff; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    .weight-val { font-size: 34px; font-weight: bold; color: #007bff; }
+    button { padding: 12px; font-size: 15px; border: none; border-radius: 8px; cursor: pointer; color: white; width: 45%; margin: 4px; }
+    .on { background-color: #28a745; }
+    .off { background-color: #dc3545; }
+    .tare { background-color: #ff9800; width: 94%; margin-bottom: 12px; font-weight: bold; }
+    .send { background-color: #007bff; width: 94%; margin-top: 8px; }
+    .refresh { background-color: #6c757d; width: 45%; margin-top: 8px; font-size: 14px; }
+    .csv { background-color: #17a2b8; width: 45%; margin-top: 8px; font-size: 14px; font-weight: bold; }
+    input { width: 90%; padding: 10px; font-size: 15px; margin-top: 8px; border: 1px solid #ccc; border-radius: 8px; }
+    #log { margin-top: 10px; font-size: 13px; color: #555; }
+    
+    .history-container { margin-top: 15px; max-height: 260px; overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { background: #007bff; color: white; position: sticky; top: 0; padding: 8px; }
+    td { padding: 7px; border-bottom: 1px solid #eee; }
+    tr:nth-child(even) { background-color: #f9f9f9; }
+  </style>
+</head>
+<body>
+
+<div class="box">
+  <h2>ESP32 & HX711 (4G)</h2>
+
+  <div class="weight-box">
+    <div>Greutate curenta:</div>
+    <div class="weight-val" id="greutate">--.- g</div>
+  </div>
+
+  <button class="tare" onclick="trimite('TARE')">TARA SENZOR (ZERO)</button>
+  
+  <h3>Control LED</h3>
+  <button class="on" onclick="trimite('LED_ON')">APRINDE</button>
+  <button class="off" onclick="trimite('LED_OFF')">STINGE</button>
+
+  <h3>Text pe LCD</h3>
+  <input type="text" id="textInput" maxlength="16" placeholder="Scrie mesajul (max 16 car)...">
+  <button class="send" onclick="trimiteText()">TRIMITE TEXT</button>
+
+  <div id="log">Conectat la server.</div>
+
+  <h3>Ultimele 100 de valori</h3>
+  <div class="history-container">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Ora</th>
+          <th>Greutate</th>
+        </tr>
+      </thead>
+      <tbody id="tabelIstoric">
+        <tr><td colspan="3">Se incarca istoricul...</td></tr>
+      </tbody>
+    </table>
+  </div>
+  
+  <button class="refresh" onclick="incarcaIstoric()">Reincarca</button>
+  <button class="csv" onclick="exportaCSV()">Descarca CSV</button>
+</div>
+
+<script>
+  const canalComenzi = "esp32_comenzi_unic_998877";
+  const canalDate = "esp32_date_unic_998877";
+  let listaValori = [];
+
+  function formateazaOra(timestampSecunde) {
+    const data = new Date(timestampSecunde * 1000);
+    return data.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function formateazaDataCompleta(timestampSecunde) {
+    const data = new Date(timestampSecunde * 1000);
+    return data.toLocaleDateString('ro-RO') + " " + data.toLocaleTimeString('ro-RO');
+  }
+
+  function actualizeazaTabel() {
+    const tbody = document.getElementById("tabelIstoric");
+    if (listaValori.length === 0) {
+      tbody.innerHTML = "<tr><td colspan='3'>Nicio valoare inregistrata inca.</td></tr>";
+      return;
+    }
+
+    let html = "";
+    const ultimele100 = listaValori.slice(0, 100);
+    ultimele100.forEach((item, index) => {
+      html += `<tr>
+        <td>${index + 1}</td>
+        <td>${formateazaOra(item.time)}</td>
+        <td><b>${item.valoare} g</b></td>
+      </tr>`;
+    });
+    tbody.innerHTML = html;
+  }
+
+  function incarcaIstoric() {
+    document.getElementById("log").innerText = "Se descarca ultimele 100 valori...";
+    fetch("https://ntfy.sh" + canalDate + "/json?poll=1&since=24h")
+      .then(response => response.text())
+      .then(text => {
+        const linii = text.trim().split("\n");
+        let citiri = [];
+        linii.forEach(linie => {
+          if (linie.length > 5) {
+            try {
+              const obj = JSON.parse(linie);
+              if (obj.message && !isNaN(parseFloat(obj.message))) {
+                citiri.push({ time: obj.time, valoare: obj.message });
+              }
+            } catch (e) {}
+          }
+        });
+
+        listaValori = citiri.reverse().slice(0, 100);
+        if (listaValori.length > 0) {
+          document.getElementById("greutate").innerText = listaValori[0].valoare + " g";
+        }
+        actualizeazaTabel();
+        document.getElementById("log").innerText = "Istoric actualizat (" + listaValori.length + " valori).";
+      })
+      .catch(err => {
+        document.getElementById("log").innerText = "Eroare la incarcarea istoricului.";
+      });
+  }
+
+  function exportaCSV() {
+    if (listaValori.length === 0) {
+      alert("Nu exista valori de exportat inca!");
+      return;
+    }
+
+    let csvContent = "\uFEFFNr;Data si Ora;Greutate (g)\n";
+    
+    listaValori.slice(0, 100).forEach((item, index) => {
+      csvContent += `${index + 1};${formateazaDataCompleta(item.time)};${item.valoare}\n`;
+    });
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "istoric_cantar_100.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    document.getElementById("log").innerText = "Fisierul CSV a fost descarcat!";
+  }
+
+  const eventSource = new EventSource("https://ntfy.sh" + canalDate + "/sse");
+  eventSource.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    if (data.message && !isNaN(parseFloat(data.message))) {
+      document.getElementById("greutate").innerText = data.message + " g";
+      listaValori.unshift({ time: data.time, valoare: data.message });
+      if (listaValori.length > 100) {
+        listaValori.pop();
+      }
+      actualizeazaTabel();
+    }
+  };
+
+  function trimite(mesaj) {
+    document.getElementById("log").innerText = "Se trimite comanda...";
+    fetch("https://ntfy.sh" + canalComenzi, {
+      method: "POST",
+      body: mesaj
+    })
+    .then(response => {
+      if (response.ok) {
+        document.getElementById("log").innerText = "Comanda executata: " + mesaj;
+      } else {
+        document.getElementById("log").innerText = "Eroare la trimitere!";
+      }
+    });
+  }
+
+  function trimiteText() {
+    const val = document.getElementById("textInput").value;
+    if (val.trim() !== "") {
+      trimite("TEXT:" + val);
+      document.getElementById("textInput").value = "";
+    }
+  }
+
+  incarcaIstoric();
+</script>
+
+</body>
+</html>
