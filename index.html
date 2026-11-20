@@ -5,14 +5,34 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cantar ESP32 - 4G</title>
 <style>
-  body{font-family:Arial;background:#f4f4f9;margin:0;padding:20px;text-align:center}
-  .card{background:#fff;border-radius:12px;padding:20px;max-width:420px;margin:auto}
-  #g{font-size:64px;font-weight:bold;margin:10px 0}
+  body{font-family:Arial;background:#f4f4f9;margin:0;padding:16px;text-align:center}
+  .card{background:#fff;border-radius:12px;padding:20px;max-width:720px;margin:auto}
+  h2{margin:4px 0}
+  #g{font-size:60px;font-weight:bold;margin:8px 0}
   #s,#e{font-size:14px;color:#666;margin:4px 0}
   .ok{color:#28a745!important}.rau{color:#dc3545!important}
   button,input{width:100%;padding:12px;margin:6px 0;font-size:16px;box-sizing:border-box;border-radius:8px;border:1px solid #ccc}
   button{border:none;color:#fff;background:#007bff}
   .row{display:flex;gap:8px}.row button{flex:1}
+
+  .grafic-box{margin:14px 0 6px;text-align:left}
+  .grafic-cap{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+  .grafic-cap h3{margin:0;font-size:16px;color:#0b0b0b}
+  #info{font-size:12px;color:#52514e}
+  .ferestre{display:flex;gap:4px;flex-wrap:wrap;margin-top:8px}
+  .ferestre button{width:auto;margin:0;padding:6px 9px;font-size:13px;background:#eceae4;color:#0b0b0b}
+  .ferestre button.activ{background:#2a78d6;color:#fff}
+  #btnLive{margin-left:auto}
+  #btnLive.activ{background:#28a745}
+  .grafic-wrap{position:relative;margin-top:8px}
+  #grafic{width:100%;height:260px;display:block;background:#fcfcfb;border-radius:8px;touch-action:none;cursor:grab}
+  #tip{position:absolute;pointer-events:none;background:#fff;border:1px solid #d6d4cc;border-radius:6px;
+       padding:4px 8px;font-size:13px;color:#0b0b0b;box-shadow:0 2px 6px rgba(0,0,0,.12);display:none;white-space:nowrap}
+  #tip b{font-size:14px}
+  #ajutor{font-size:12px;color:#8a887f;margin-top:4px}
+  #statistici{display:flex;justify-content:space-around;font-size:13px;color:#52514e;margin-top:6px}
+  #statistici b{color:#0b0b0b}
+  .mic{width:auto!important;padding:6px 10px!important;font-size:13px!important;background:#fff!important;color:#52514e!important;border:1px solid #ccc!important;margin:6px 6px 0 0!important}
 </style>
 </head>
 <body>
@@ -22,6 +42,35 @@
   <!-- Daca acest text ramane asa, JavaScript NU ruleaza (pagina e deschisa intr-un vizualizator) -->
   <div id="s" class="rau">JavaScript nu ruleaza! Deschide pagina cu Chrome.</div>
   <div id="e">ESP32: necunoscut</div>
+
+  <div class="grafic-box">
+    <div class="grafic-cap">
+      <h3>Greutate (g) în timp</h3>
+      <span id="info"></span>
+    </div>
+    <div class="ferestre" id="ferestre">
+      <button data-sec="900">15 min</button>
+      <button data-sec="3600" class="activ">1 h</button>
+      <button data-sec="21600">6 h</button>
+      <button data-sec="86400">24 h</button>
+      <button data-sec="604800">7 zile</button>
+      <button data-sec="2678400">31 zile</button>
+      <button id="btnLive" class="activ">● Live</button>
+    </div>
+    <div class="grafic-wrap">
+      <canvas id="grafic" role="img" aria-label="Grafic greutate in functie de timp"></canvas>
+      <div id="tip"></div>
+    </div>
+    <div id="ajutor">Zoom: două degete / rotița mouse-ului · Deplasare: trage stânga-dreapta · Atinge pentru valoare</div>
+    <div id="statistici">
+      <span>Min: <b id="sMin">--</b></span>
+      <span>Medie: <b id="sMed">--</b></span>
+      <span>Max: <b id="sMax">--</b></span>
+    </div>
+    <button class="mic" onclick="cereIstoric()">Reîncarcă istoricul de la ESP32</button>
+    <button class="mic" onclick="descarcaCSV()">Descarcă CSV</button>
+  </div>
+
   <button onclick="cmd('TARE')" style="background:#28a745">TARA</button>
   <div class="row">
     <button onclick="cmd('LED_ON')">LED ON</button>
@@ -38,18 +87,101 @@
   const T_GREUTATE = PREFIX + "/greutate";
   const T_COMENZI  = PREFIX + "/comenzi";
   const T_STARE    = PREFIX + "/stare";
+  const T_ISTORIC  = PREFIX + "/istoric";
 
   const elG = document.getElementById('g');
   const elS = document.getElementById('s');
   const elE = document.getElementById('e');
+  const elInfo = document.getElementById('info');
   let client = null;
   let ultimaValoare = 0;
 
   function stare(text, clasa) { elS.textContent = text; elS.className = clasa || ""; }
-
   stare("Se incarca biblioteca MQTT...");
 
-  // Biblioteca MQTT: incercam doua surse, pe rand
+  // =================================================================
+  //  DATE: secunde (ultimele 3 ore) + medii la 10 minute (31 zile)
+  //  pastrate si in telefon (localStorage), ca sa nu se piarda la inchidere
+  // =================================================================
+  const PASTREAZA_SEC = 3 * 3600;
+  const PAS = 600;                       // o valoare memorata la 10 minute
+  const PASTREAZA_MED = 32 * 86400;
+  const secunde = new Map();   // epoch (s) -> greutate
+  const medii   = new Map();   // epoch inceput interval 10 min (s) -> medie
+  let acc = { k: 0, suma: 0, nr: 0 };
+
+  const acum = () => Date.now() / 1000;
+
+  function curata() {
+    const a = acum();
+    for (const t of secunde.keys()) if (t < a - PASTREAZA_SEC) secunde.delete(t);
+    for (const t of medii.keys())   if (t < a - PASTREAZA_MED) medii.delete(t);
+  }
+
+  function salveazaLocal() {
+    curata();
+    try {
+      localStorage.setItem("cantar10_" + PREFIX, JSON.stringify({
+        s: [...secunde.entries()], z: [...medii.entries()]
+      }));
+    } catch (e) {}
+  }
+
+  function incarcaLocal() {
+    try {
+      localStorage.removeItem("cantar_" + PREFIX);          // date din versiunea veche
+      const d = JSON.parse(localStorage.getItem("cantar10_" + PREFIX) || "null");
+      if (!d) return;
+      d.s.forEach(([t, v]) => secunde.set(t, v));
+      d.z.forEach(([t, v]) => medii.set(t, v));
+      curata();
+    } catch (e) {}
+  }
+
+  function adaugaLive(t, g) {
+    t = Math.round(t);
+    if (g !== null) secunde.set(t, g);
+    // media pe 10 min calculata si in pagina (pentru intervalele inca netrimise de ESP)
+    const k = Math.floor(t / PAS) * PAS;
+    if (k !== acc.k) {
+      if (acc.nr >= 60 && !medii.has(acc.k)) medii.set(acc.k, acc.suma / acc.nr);   // doar daca a prins macar 1 minut
+      acc = { k: k, suma: 0, nr: 0 };
+    }
+    if (g !== null) { acc.suma += g; acc.nr++; }
+    cereDesen();
+  }
+
+  // bucati de istoric de la ESP32: "s;start;v,v,,v" / "z;start;v,,v" (pas 600 s) / "end"
+  function primesteIstoric(text) {
+    if (text === "end") {
+      elInfo.textContent = "Istoric: " + medii.size + " valori (la 10 min)";
+      salveazaLocal();
+      cereDesen();
+      return;
+    }
+    const [tip, start, lista] = text.split(";");
+    if (tip !== "s" && tip !== "z") return;
+    const t0 = +start, pas = tip === "s" ? 1 : PAS, harta = tip === "s" ? secunde : medii;
+    (lista || "").split(",").forEach((v, i) => { if (v !== "") harta.set(t0 + i * pas, +v); });
+    elInfo.textContent = "Se primește istoricul...";
+    cereDesen();
+  }
+
+  function cereIstoric() {
+    if (client && client.connected) {
+      client.publish(T_COMENZI, "ISTORIC", { qos: 0, retain: false });
+      elInfo.textContent = "Cer istoricul de la ESP32...";
+    }
+  }
+
+  incarcaLocal();
+  setInterval(salveazaLocal, 30000);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) salveazaLocal(); });
+  window.addEventListener("pagehide", salveazaLocal);
+
+  // =================================================================
+  //  MQTT
+  // =================================================================
   const SURSE = [
     "https://unpkg.com/mqtt@5/dist/mqtt.min.js",
     "https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js"
@@ -66,38 +198,32 @@
     document.head.appendChild(s);
   }
 
-  // ESP32 trimite la ambele brokere. Primul e pe portul 443 (nu e blocat pe 4G);
-  // daca nu merge, se incearca HiveMQ pe 8884 si 8000.
   const ADRESE = [
-    "wss://mqtt.eclipseprojects.io:443/mqtt",
     "wss://broker.hivemq.com:8884/mqtt",
-    "ws://broker.hivemq.com:8000/mqtt"
+    "ws://broker.hivemq.com:8000/mqtt",
+    "wss://mqtt.eclipseprojects.io:443/mqtt"
   ];
-  let idxAdresa = 0, incercari = 0, ultimaEroare = "", conectatOdata = false;
+  let idxAdresa = 0, incercari = 0, ultimaEroare = "", conectatOdata = false, istoricCerut = false;
+  const gazda = u => u.split("//")[1].split("/")[0];
 
   function porneste() {
     const url = ADRESE[idxAdresa];
-    stare("Conectare la " + url.split("//")[1].split("/")[0] + " ...");
+    stare("Conectare la " + gazda(url) + " ...");
     try {
       client = mqtt.connect(url, {
         clientId: "web_" + Math.random().toString(16).slice(2, 10),
-        reconnectPeriod: 3000,
-        connectTimeout: 6000,
-        clean: true
+        reconnectPeriod: 3000, connectTimeout: 6000, clean: true
       });
-    } catch (err) {
-      stare("Eroare la conectare: " + err.message, "rau");
-      return;
-    }
+    } catch (err) { stare("Eroare la conectare: " + err.message, "rau"); return; }
 
     client.on("connect", () => {
       conectatOdata = true;
       incercari = 0;
-      client.subscribe([T_GREUTATE, T_STARE]);
-      stare("Conectat (" + url.split("//")[1].split("/")[0] + "), astept date de la ESP32...");
-      // Daca pe acest broker nu vin date in 6 s, ESP32 nu e conectat aici -> urmatorul broker
+      istoricCerut = false;
+      client.subscribe([T_GREUTATE, T_STARE, T_ISTORIC]);
+      stare("Conectat (" + gazda(url) + "), astept date de la ESP32...");
       const momentConectare = Date.now();
-      setTimeout(() => {
+      setTimeout(() => {          // fara date in 6 s -> ESP32 nu e pe acest broker
         if (ultimaValoare < momentConectare) {
           conectatOdata = false;
           client.removeAllListeners("close");
@@ -111,19 +237,19 @@
     client.on("close", () => {
       if (conectatOdata) { stare("Legatura pierduta, reconectare...", "rau"); return; }
       incercari++;
-      if (incercari >= 2) {             // dupa 2 esecuri trecem la portul urmator
+      if (incercari >= 2) {
         incercari = 0;
         client.end(true);
         idxAdresa = (idxAdresa + 1) % ADRESE.length;
         setTimeout(porneste, 500);
       } else {
-        stare("Nu ma pot conecta la " + url.split("//")[1].split("/")[0] +
-              (ultimaEroare ? " (" + ultimaEroare + ")" : "") + ", reincerc...", "rau");
+        stare("Nu ma pot conecta la " + gazda(url) + (ultimaEroare ? " (" + ultimaEroare + ")" : "") + ", reincerc...", "rau");
       }
     });
 
-    client.on("message", (topic, msg) => {
+    client.on("message", (topic, msg, packet) => {
       const text = msg.toString();
+      if (topic === T_ISTORIC) { primesteIstoric(text); return; }
       if (topic === T_STARE) {
         elE.textContent = "ESP32: " + text;
         elE.className = text === "online" ? "ok" : "rau";
@@ -132,14 +258,16 @@
       try {
         const d = JSON.parse(text);
         elG.textContent = d.ok ? d.g.toFixed(1) + " g" : "Eroare senzor";
+        const t = (d.t && d.t > 1700000000) ? d.t : acum();
+        if (!packet.retain || d.t) adaugaLive(t, d.ok ? d.g : null);
         ultimaValoare = Date.now();
         elE.textContent = "ESP32: online";
         elE.className = "ok";
+        if (!istoricCerut) { istoricCerut = true; cereIstoric(); }   // o data pe conexiune
       } catch (e) {}
     });
   }
 
-  // indicator de "prospetime" a datelor
   setInterval(() => {
     if (!ultimaValoare) return;
     const sec = Math.round((Date.now() - ultimaValoare) / 1000);
@@ -153,6 +281,298 @@
     else stare("Nu sunt conectat la broker - comanda nu a fost trimisa", "rau");
   }
 
+  // =================================================================
+  //  GRAFIC cu zoom si deplasare pe orizontala
+  // =================================================================
+  const cv = document.getElementById("grafic");
+  const ctx = cv.getContext("2d");
+  const tip = document.getElementById("tip");
+  const CULOARE = "#2a78d6", GRILA = "#e6e5e0", TEXT2 = "#52514e", FUNDAL = "#fcfcfb";
+  const M = { st: 56, dr: 12, sus: 12, jos: 26 };
+  const SPAN_MIN = 30, SPAN_MAX = 32 * 86400;
+  const ZILE = ["Du", "Lu", "Ma", "Mi", "Jo", "Vi", "Sâ"];
+
+  let span = 3600;        // secunde afisate
+  let live = true;        // capatul din dreapta urmareste ora curenta
+  let vSfarsit = acum();  // capatul din dreapta cand nu e live
+  let hoverX = null;
+
+  function interval() {
+    const a = acum();
+    if (live) vSfarsit = a;
+    vSfarsit = Math.min(vSfarsit, a);
+    return [vSfarsit - span, vSfarsit];
+  }
+
+  function seteazaVedere(nouSpan, nouSfarsit) {
+    const a = acum();
+    span = Math.max(SPAN_MIN, Math.min(SPAN_MAX, nouSpan));
+    vSfarsit = Math.max(a - SPAN_MAX + span, Math.min(a, nouSfarsit));
+    live = vSfarsit >= a - 1;
+    actualizeazaButoane();
+    cereDesen();
+  }
+
+  function actualizeazaButoane() {
+    document.querySelectorAll("#ferestre button[data-sec]").forEach(b =>
+      b.classList.toggle("activ", Math.abs(+b.dataset.sec - span) < 1));
+    document.getElementById("btnLive").classList.toggle("activ", live);
+  }
+
+  document.querySelectorAll("#ferestre button[data-sec]").forEach(b => {
+    b.onclick = () => seteazaVedere(+b.dataset.sec, acum());
+  });
+  document.getElementById("btnLive").onclick = () => seteazaVedere(span, acum());
+
+  // punctele din intervalul [t0, t1]: pe intervale scurte secundele, altfel mediile la 10 min
+  function puncte(t0, t1) {
+    const pts = [];
+    let primaSecunda = Infinity;
+    if (span <= 3 * 3600) {
+      for (const [t, v] of secunde) if (t >= t0 && t <= t1) { pts.push({ t, v, pas: 1 }); if (t < primaSecunda) primaSecunda = t; }
+    }
+    for (const [t, v] of medii) {
+      if (t + PAS >= t0 && t <= t1 && t + PAS <= primaSecunda) pts.push({ t: t + PAS / 2, v, pas: PAS });  // la mijlocul intervalului
+    }
+    if (span > 3 * 3600) {
+      // intervalele care exista doar ca secunde (inca netrimise de ESP) -> le mediem aici
+      const grup = new Map();
+      for (const [t, v] of secunde) {
+        const k = Math.floor(t / PAS) * PAS;
+        if (medii.has(k) || k + PAS < t0 || k > t1) continue;
+        const g = grup.get(k) || { s: 0, n: 0 };
+        g.s += v; g.n++; grup.set(k, g);
+      }
+      for (const [k, g] of grup) pts.push({ t: k + PAS / 2, v: g.s / g.n, pas: PAS });
+    }
+    pts.sort((a, b) => a.t - b.t);
+    return pts;
+  }
+
+  function pasRotund(interval, nrDiviziuni) {
+    const brut = interval / nrDiviziuni;
+    const p = Math.pow(10, Math.floor(Math.log10(brut)));
+    const f = brut / p;
+    return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
+  }
+
+  const z = n => String(n).padStart(2, "0");
+  function eticheta(t, pasT) {
+    const d = new Date(t * 1000);
+    if (pasT >= 86400 || (d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0 && pasT >= 3600))
+      return ZILE[d.getDay()] + " " + z(d.getDate()) + "." + z(d.getMonth() + 1);
+    return z(d.getHours()) + ":" + z(d.getMinutes()) + (pasT < 60 ? ":" + z(d.getSeconds()) : "");
+  }
+  function dataOra(t) {
+    const d = new Date(t * 1000);
+    return ZILE[d.getDay()] + " " + z(d.getDate()) + "." + z(d.getMonth() + 1) + " " +
+           z(d.getHours()) + ":" + z(d.getMinutes()) + ":" + z(d.getSeconds());
+  }
+
+  let desenProgramat = false;
+  function cereDesen() {
+    if (desenProgramat) return;
+    desenProgramat = true;
+    requestAnimationFrame(() => { desenProgramat = false; deseneaza(); });
+  }
+
+  function deseneaza() {
+    const dpr = window.devicePixelRatio || 1;
+    const W = cv.clientWidth, H = cv.clientHeight;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = FUNDAL; ctx.fillRect(0, 0, W, H);
+
+    const lw = W - M.st - M.dr, lh = H - M.sus - M.jos;
+    const [t0, t1] = interval();
+    const pts = puncte(t0, t1);
+    const valori = pts.map(p => p.v);
+
+    // ---- scala Y automata ----
+    let min = valori.length ? Math.min(...valori) : 0;
+    let max = valori.length ? Math.max(...valori) : 10;
+    if (max - min < 1) { const c = (max + min) / 2; min = c - 0.5; max = c + 0.5; }
+    const pasY = pasRotund(max - min, 4);
+    const yMin = Math.floor(min / pasY) * pasY, yMax = Math.ceil(max / pasY) * pasY;
+    const X = t => M.st + (t - t0) / span * lw;
+    const Y = g => M.sus + (yMax - g) / (yMax - yMin) * lh;
+    const zec = pasY < 1 ? 1 : 0;
+
+    ctx.font = "11px Arial"; ctx.lineWidth = 1;
+    ctx.fillStyle = TEXT2; ctx.strokeStyle = GRILA;
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (let v = yMin; v <= yMax + pasY / 2; v += pasY) {
+      const y = Math.round(Y(v)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(M.st, y); ctx.lineTo(W - M.dr, y); ctx.stroke();
+      ctx.fillText(v.toFixed(zec) + " g", M.st - 6, y);
+    }
+
+    // ---- axa X: ora / ziua (aliniata la ora locala) ----
+    const PASI = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 345600, 604800];
+    const nrEtichete = Math.max(2, Math.floor(lw / 85));
+    const pasT = PASI.find(s => span / s <= nrEtichete) || 604800;
+    const decalaj = new Date().getTimezoneOffset() * 60;     // aliniere la miezul noptii local
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (let t = Math.ceil((t0 - decalaj) / pasT) * pasT + decalaj; t <= t1; t += pasT) {
+      const x = Math.round(X(t)) + 0.5;
+      ctx.strokeStyle = GRILA;
+      ctx.beginPath(); ctx.moveTo(x, M.sus + lh); ctx.lineTo(x, M.sus + lh + 4); ctx.stroke();
+      ctx.fillText(eticheta(t, pasT), x, M.sus + lh + 7);
+    }
+
+    // ---- linia de date (intrerupta unde lipsesc date) ----
+    ctx.save();
+    ctx.beginPath(); ctx.rect(M.st, M.sus - 2, lw, lh + 4); ctx.clip();
+    ctx.strokeStyle = CULOARE; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.beginPath();
+    let prec = null;
+    pts.forEach(p => {
+      const x = X(p.t), y = Y(p.v);
+      const pauza = prec && (p.t - prec.t) > Math.max(p.pas, prec.pas) * 2.5;
+      if (!prec || pauza) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      prec = p;
+    });
+    ctx.stroke();
+    // puncte izolate (o singura valoare intre pauze) -> marcaj mic, sa se vada
+    pts.forEach((p, i) => {
+      const a = pts[i - 1], b = pts[i + 1];
+      const singur = (!a || p.t - a.t > p.pas * 2.5) && (!b || b.t - p.t > p.pas * 2.5);
+      if (singur) { ctx.beginPath(); ctx.arc(X(p.t), Y(p.v), 2, 0, 2 * Math.PI); ctx.fillStyle = CULOARE; ctx.fill(); }
+    });
+    ctx.restore();
+
+    if (!valori.length) {
+      ctx.fillStyle = TEXT2; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = "13px Arial";
+      ctx.fillText(live ? "Aștept date de la ESP32..." : "Nu există date în acest interval", M.st + lw / 2, M.sus + lh / 2);
+    }
+
+    // ---- statistici ----
+    const f = v => v.toFixed(1) + " g";
+    document.getElementById("sMin").textContent = valori.length ? f(Math.min(...valori)) : "--";
+    document.getElementById("sMax").textContent = valori.length ? f(Math.max(...valori)) : "--";
+    document.getElementById("sMed").textContent = valori.length ? f(valori.reduce((a, b) => a + b, 0) / valori.length) : "--";
+
+    // ---- crosshair + tooltip ----
+    tip.style.display = "none";
+    if (hoverX === null || !pts.length || hoverX < M.st || hoverX > W - M.dr) return;
+    let p = null, dist = Infinity;
+    pts.forEach(q => { const d = Math.abs(X(q.t) - hoverX); if (d < dist) { dist = d; p = q; } });
+    if (!p || dist > 40) return;
+    const px = X(p.t), py = Y(p.v);
+    ctx.strokeStyle = "#a8a69e"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(Math.round(px) + 0.5, M.sus); ctx.lineTo(Math.round(px) + 0.5, M.sus + lh); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, 2 * Math.PI); ctx.fillStyle = FUNDAL; ctx.fill();
+    ctx.beginPath(); ctx.arc(px, py, 4, 0, 2 * Math.PI); ctx.fillStyle = CULOARE; ctx.fill();
+    tip.innerHTML = "<b>" + p.v.toFixed(1) + " g</b>" + (p.pas === PAS ? " (medie 10 min)" : "") + "<br>" +
+                    (p.pas === PAS ? dataOra(p.t - PAS / 2).slice(0, -3) + "–" + dataOra(p.t + PAS / 2).slice(-8, -3) : dataOra(p.t));
+    tip.style.display = "block";
+    const tw = tip.offsetWidth;
+    let left = px + 10;
+    if (left + tw > W) left = px - tw - 10;
+    tip.style.left = Math.max(0, left) + "px";
+    tip.style.top = Math.max(0, py - 44) + "px";
+  }
+
+  // ---- interactiune: tragere, ciupire (pinch), rotita ----
+  const atingeri = new Map();     // pointerId -> {x}
+  let start = null;               // starea la inceputul gestului
+
+  function xLocal(e) { const r = cv.getBoundingClientRect(); return e.clientX - r.left; }
+
+  function zoomLa(x, factor) {
+    const [t0] = interval();
+    const lw = cv.clientWidth - M.st - M.dr;
+    if (live) { seteazaVedere(span * factor, acum()); return; }   // in modul live, dreapta ramane "acum"
+    const frac = Math.max(0, Math.min(1, (x - M.st) / lw));
+    const ancora = t0 + frac * span;
+    const nou = Math.max(SPAN_MIN, Math.min(SPAN_MAX, span * factor));
+    seteazaVedere(nou, ancora - frac * nou + nou);
+  }
+
+  cv.addEventListener("pointerdown", e => {
+    cv.setPointerCapture(e.pointerId);
+    atingeri.set(e.pointerId, { x: xLocal(e) });
+    const pct = [...atingeri.values()];
+    start = { span, vSfarsit: interval()[1], x: pct[0].x, mutat: false,
+              dist: pct.length === 2 ? Math.abs(pct[0].x - pct[1].x) : 0,
+              mijloc: pct.length === 2 ? (pct[0].x + pct[1].x) / 2 : 0, live };
+    cv.style.cursor = "grabbing";
+  });
+
+  cv.addEventListener("pointermove", e => {
+    const x = xLocal(e);
+    if (!atingeri.has(e.pointerId)) {            // mouse fara click -> doar tooltip
+      if (e.pointerType === "mouse") { hoverX = x; cereDesen(); }
+      return;
+    }
+    atingeri.get(e.pointerId).x = x;
+    const pct = [...atingeri.values()];
+    const lw = cv.clientWidth - M.st - M.dr;
+    if (pct.length >= 2 && start.dist > 10) {     // ciupire = zoom
+      const d = Math.abs(pct[0].x - pct[1].x);
+      if (d < 10) return;
+      const nou = Math.max(SPAN_MIN, Math.min(SPAN_MAX, start.span * start.dist / d));
+      const frac = Math.max(0, Math.min(1, (start.mijloc - M.st) / lw));
+      const ancora = start.vSfarsit - start.span + frac * start.span;
+      if (start.live) seteazaVedere(nou, acum());
+      else seteazaVedere(nou, ancora - frac * nou + nou);
+      start.mutat = true;
+      hoverX = null;
+    } else if (pct.length === 1) {               // tragere = deplasare in timp
+      const dx = x - start.x;
+      if (Math.abs(dx) > 4) start.mutat = true;
+      if (start.mutat) {
+        seteazaVedere(start.span, start.vSfarsit - dx / lw * start.span);
+        hoverX = null;
+      }
+    }
+  });
+
+  function terminaGest(e) {
+    if (atingeri.has(e.pointerId) && start && !start.mutat && atingeri.size === 1) {
+      hoverX = xLocal(e);                        // atingere scurta -> arata valoarea
+      cereDesen();
+    }
+    atingeri.delete(e.pointerId);
+    if (atingeri.size === 1) {                   // a ramas un deget: continua ca tragere
+      const p = [...atingeri.values()][0];
+      start = { span, vSfarsit: interval()[1], x: p.x, mutat: true, dist: 0, mijloc: 0, live };
+    }
+    if (atingeri.size === 0) cv.style.cursor = "grab";
+  }
+  cv.addEventListener("pointerup", terminaGest);
+  cv.addEventListener("pointercancel", terminaGest);
+  cv.addEventListener("pointerleave", e => { if (e.pointerType === "mouse" && !atingeri.size) { hoverX = null; cereDesen(); } });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    zoomLa(xLocal(e), Math.exp(e.deltaY * 0.0015));
+  }, { passive: false });
+
+  window.addEventListener("resize", cereDesen);
+  setInterval(() => { if (live) cereDesen(); }, 1000);   // graficul "curge" spre stanga
+
+  // ---- export CSV (toate datele din telefon) ----
+  function descarcaCSV() {
+    const rand = (t, v, tipV) => {
+      const d = new Date(t * 1000);
+      return d.getFullYear() + "-" + z(d.getMonth() + 1) + "-" + z(d.getDate()) + " " +
+             z(d.getHours()) + ":" + z(d.getMinutes()) + ":" + z(d.getSeconds()) + ";" +
+             v.toFixed(1).replace(".", ",") + ";" + tipV;
+    };
+    const linii = ["data_ora;greutate_g;tip"];
+    [...medii.entries()].sort((a, b) => a[0] - b[0]).forEach(([t, v]) => linii.push(rand(t, v, "medie 10 min")));
+    [...secunde.entries()].sort((a, b) => a[0] - b[0]).forEach(([t, v]) => linii.push(rand(t, v, "secunda")));
+    const blob = new Blob(["﻿" + linii.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "cantar_" + new Date().toISOString().slice(0, 10) + ".csv";
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  actualizeazaButoane();
+  deseneaza();
   incarca(0);
 </script>
 </body>
